@@ -1,0 +1,6 @@
+yellow is SDA
+blue is SCL
+
+IMU is at 0x68
+BARO is at 0x76 - https://create.arduino.cc/projecthub/SurtrTech/bmp280-measure-temperature-pressure-and-altitude-e1c857
+GPS - http://arduiniana.org/libraries/tinygpsplus/
