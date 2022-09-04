@@ -1,8 +1,9 @@
 #include <TinyGPS++.h>
 #include <TinyGPSPlus.h>
-#include <Adafruit_BMP280.h>
 #include <Adafruit_MPU6050.h>
-#include <Adafruit_Sensor.h>
+
+
+#include <BMP280_DEV.h>
 
 #include <Wire.h>
 #include <SoftwareSerial.h>
@@ -15,7 +16,7 @@
 #define TIMEOUT (1000) //one second timeouts
 
 TinyGPSPlus gpsObject;
-Adafruit_BMP280 baro;
+BMP280_DEV bmp;
 Adafruit_MPU6050 mpu;
 
 SoftwareSerial GPS(GPS_RX, GPS_TX);
@@ -23,26 +24,31 @@ SoftwareSerial LoRa(LORA_RX, LORA_TX);
 
 long oldTime = 0; //used for timing status update broadcasts
 String packet = "";
-double initialPressure = 0.0;
+float temperature, pressure, baro_alt;
 
 void setup() {
+  //uploading delay
+  delay(5000);
+  
+  //DEBUG
+  Serial.begin(115200);
+  Serial.println("In setup");
+  
   GPS.begin(9600);
   LoRa.begin(9600);
 
+  Serial.println("SoftwareSerial done");
+
   Wire.begin();
-  bmp.begin(0x76); //not sure if address is necessary but why not
-  mpu.begin(0x68); //same thing about the addy here
+  bmp.begin(); 
+  mpu.begin(); 
 
-  //set BMP280 settings (copied from create.arduino.cc)
-  bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,     /* Operating Mode. */
-                  Adafruit_BMP280::SAMPLING_X2,     /* Temp. oversampling */
-                  Adafruit_BMP280::SAMPLING_X16,    /* Pressure oversampling */
-                  Adafruit_BMP280::FILTER_X16,      /* Filtering. */
-                  Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
+  Serial.println("I2C done");
 
-  //calibrate bmp
-  delay(1000);
-  initialPressure = bmp.readPressure();
+  bmp.startNormalConversion();
+
+  //DEBUG
+  Serial.println("Done setup!");
 }
 
 void loop() {
@@ -56,9 +62,15 @@ void loop() {
     broadcastUpdate();
     oldTime = millis();
   }
+
+  delay(10);
 }
 
 void broadcastUpdate() {
+  //get baro data
+
+  bmp.getMeasurements(temperature, pressure, baro_alt);
+  
   //add sat count to packet
   packet = "SATCNT:";
   packet += gpsObject.satellites.value();
@@ -69,7 +81,7 @@ void broadcastUpdate() {
 
   //append BARO altitude data
   packet += "|BAROALT:";
-  packet += bmp.readAltitude(initialPressure);
+  packet += baro_alt;
 
   //append location data
   if (gpsObject.location.isValid()) {
@@ -80,4 +92,6 @@ void broadcastUpdate() {
   } else {
     packet += "|LAT:0|LON:0";
   }
+
+  Serial.println(packet); //DEBUG - replace with LoRa.println
 }
