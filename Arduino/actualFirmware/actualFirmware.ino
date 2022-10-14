@@ -1,30 +1,32 @@
+#include <Wire.h>
+#include <SPI.h>
+#include <SoftwareSerial.h>
 #include <TinyGPS++.h>
 #include <TinyGPSPlus.h>
+#include <Adafruit_BMP280.h>
 #include <Adafruit_MPU6050.h>
-
-
-#include <BMP280_DEV.h>
-
-#include <Wire.h>
-#include <SoftwareSerial.h>
 
 #define GPS_RX 10
 #define GPS_TX 12
 #define LORA_TX 11
 #define LORA_RX 13
 
+#define PACKET_DELAY 500
+
 #define TIMEOUT (1000) //one second timeouts
 
 TinyGPSPlus gpsObject;
-BMP280_DEV bmp;
+Adafruit_BMP280 bmp;
 Adafruit_MPU6050 mpu;
+
+sensors_event_t a, g, temp; //sensor events for mpu
 
 SoftwareSerial GPS(GPS_RX, GPS_TX);
 SoftwareSerial LoRa(LORA_RX, LORA_TX);
 
 long oldTime = 0; //used for timing status update broadcasts
 String packet = "";
-float temperature, pressure, baro_alt;
+float groundPressure = 0.0;
 
 void setup() {
   //uploading delay
@@ -39,16 +41,21 @@ void setup() {
 
   Serial.println("SoftwareSerial done");
 
-  Wire.begin();
-  bmp.begin(); 
+  Wire.begin(); //TODO: needed?
   mpu.begin(); 
+  mpu.setAccelerometerRange(MPU6050_RANGE_16_G);
+  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+  
+  bmp.begin(0x76, 0x58);
+  groundPressure = bmp.readPressure() / 100;
+  bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,     /* Operating Mode. */
+                  Adafruit_BMP280::SAMPLING_X2,     /* Temp. oversampling */
+                  Adafruit_BMP280::SAMPLING_X16,    /* Pressure oversampling */
+                  Adafruit_BMP280::FILTER_X16,      /* Filtering. */
+                  Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
 
   Serial.println("I2C done");
-
-  bmp.startNormalConversion();
-
-  //DEBUG
-  Serial.println("Done setup!");
 }
 
 void loop() {
@@ -57,8 +64,11 @@ void loop() {
     gpsObject.encode(GPS.read());
   }
 
+  //read accelerometer data
+  mpu.getEvent(&a, &g, &temp);
+
   //broadcast update
-  if (millis() > (oldTime + 1000)) {
+  if (millis() > (oldTime + PACKET_DELAY)) {
     broadcastUpdate();
     oldTime = millis();
   }
@@ -66,11 +76,7 @@ void loop() {
   delay(10);
 }
 
-void broadcastUpdate() {
-  //get baro data
-
-  bmp.getMeasurements(temperature, pressure, baro_alt);
-  
+void broadcastUpdate() {   
   //add sat count to packet
   packet = "SATCNT:";
   packet += gpsObject.satellites.value();
@@ -81,7 +87,11 @@ void broadcastUpdate() {
 
   //append BARO altitude data
   packet += "|BAROALT:";
-  packet += baro_alt;
+  packet += bmp.readAltitude(groundPressure);
+
+  //append Y_ACCEL data
+  packet += "|Y_ACCEL:";
+  packet += -1*(a.acceleration.y - 9.81);
 
   //append location data
   if (gpsObject.location.isValid()) {
