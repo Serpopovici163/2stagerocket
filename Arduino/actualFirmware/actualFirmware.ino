@@ -8,9 +8,9 @@
 #include <Servo.h>
 
 #define GPS_RX 10
-#define GPS_TX 12
+#define GPS_TX 11
 #define LORA_TX 13
-#define LORA_RX 11
+#define LORA_RX 15
 
 #define STAGE_2_IGNITER 31
 #define RECOVERY_IGNITER 30
@@ -24,6 +24,8 @@
 #define MIN_ALT_FOR_STAGE_2_IGNITION 250 //meters
 #define STAGE_2_IGNITION_DELAY 5000 //milliseconds
 #define MAIN_CHUTE_DEPLOY_ALT 250 //meters
+
+#define MIN_ALT_FOR_FAILSAFE 50 //meters
 
 TinyGPSPlus gpsObject;
 Adafruit_BMP280 bmp;
@@ -45,7 +47,7 @@ float baroAlt = 0;
 float yAccel = 0;
 float xTilt = 0;
 float zTilt = 0;
-int flightState = 0 //0 on ground, 1 launch detected, 2 second stage ignited, 3 drogue deployed, 4 main deployed, 5 landed
+int flightState = 0; //0 on ground, 1 launch detected, 2 second stage ignited, 3 drogue deployed, 4 main deployed, 5 landed
 
 //time variables
 unsigned long long launchTime = 0;
@@ -55,7 +57,7 @@ unsigned long long mainChuteDeployedTime = 0;
 
 void setup() {
   //uploading delay
-  delay(5000);
+  delay(2000);
   
   //DEBUG
   Serial.begin(9600);
@@ -87,28 +89,27 @@ void setup() {
   mainChuteServo.write(0); //set servo to max position
 
   Serial.println("I/O init done");
+
+  //add delay stage in case LoRa RX doesn't work
+  isArmed = true;
 }
 
 void loop() {
-  //read any availabel data from GPS
+  //read any available data from GPS
   while (GPS.available()) {
     gpsObject.encode(GPS.read());
   }
 
   while (LoRa.available()) {
-    if (LoRa.readString() == "ARM") {
-      isArmed = true;
-    } else if (LoRa.readString() == "DISARM") {
-      isArmed = false;
-    }
+    Serial.print(LoRa.read());
   }
 
   //read accelerometer data
   mpu.getEvent(&a, &g, &temp);
   updateStateVars();
 
-  //broadcast update
-  if (millis() > (oldTime + PACKET_DELAY)) {
+  //broadcast update if armed
+  if (millis() > (oldTime + PACKET_DELAY) && isArmed) {
     broadcastUpdate();
     oldTime = millis();
   }
@@ -119,12 +120,13 @@ void loop() {
     //now act according to flight state
     if (flightState == 0) { //on ground
       //check if accel is positive and if so increment state
-      if (yAccel > 0) {
+      if (yAccel > 0 && (xTilt < MAX_TILT && zTilt < MAX_TILT)) {
         flightState = 1;
         launchTime = millis(); //log launch time
+        LoRa.println("LAUNCH DETECTED");
       }
     } else if (flightState == 1) { //launch detected
-      if (millis() > (launchTime + STAGE_2_IGNITION_DELAY)) {
+      if (millis() - launchTime > STAGE_2_IGNITION_DELAY) {
         //ignition delay has been reached
         //check if all stage 2 ignition criteria are met, if not deploy recovery
         //check altitude and tilt on both x and z axes
@@ -132,9 +134,15 @@ void loop() {
           //ignite second stage
           flightState = 2;
           stageTwoIgnitionTime = millis();
-        } else {
+          LoRa.println("STAGE2");
+        } else if (baroAlt > MIN_ALT_FOR_FAILSAFE) {
           flightState = 3;
+          stageTwoIgnitionTime = -1;
           recoveryDeployedTime = millis();
+          LoRa.println("FAILSAFE");
+        } else {
+          flightState = -5;
+          LoRa.println("CRITICAL FAILURE");
         }
       }
     } else if (flightState == 2) { //second stage ignited
@@ -148,7 +156,7 @@ void loop() {
     } else if (flightState == 4) { //main deployed
       delay(1000);
       if (baroAlt == bmp.readAltitude(groundPressure)) {
-        flighState == 5; //touchdown
+        flightState == 5; //touchdown
       }
     }
   }
@@ -158,8 +166,8 @@ void loop() {
 
 void updateStateVars() {
   yAccel = -1*a.acceleration.y;
-  xTilt = g.orientation.x;
-  zTilt = g.orientation.z;
+  xTilt = atan2(a.acceleration.y, a.acceleration.z) * 57.3 - 90;
+  zTilt = atan2((- a.acceleration.x) , sqrt(a.acceleration.y * a.acceleration.y + a.acceleration.z * a.acceleration.z)) * 57.3;
   baroAlt = bmp.readAltitude(groundPressure);
 }
 
@@ -176,6 +184,10 @@ void broadcastUpdate() {
   //append ARM STATE data
   packet += "|ARM_STATE:";
   packet += isArmed;
+
+  //append FLIGHT STATE data
+  packet += "|FLIGHT_STATE:";
+  packet += flightState;
 
   //append BARO altitude data
   packet += "|BAROALT:";
