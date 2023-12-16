@@ -226,10 +226,10 @@ void updateAscentState() {
 
    //compute average
    altBufferAverage = 0.0;
-   for (int i = 0; i < ALT_BUFFER_SIZE; i++) {
-    altBufferAverage += altBuffer[i];
+   for (int i = 0; i < ALT_BUFFER_SIZE/2; i++) {
+    altBufferAverage += (altBuffer[i*2+1] - altBuffer[i*2]);
    }
-   altBufferAverage /= ALT_BUFFER_SIZE;
+   altBufferAverage /= (ALT_BUFFER_SIZE / 2);
 
    //assign ascentState
    if (altBufferAverage > 0) {
@@ -277,19 +277,23 @@ void updateFlightState() {
       failsafe(); //TODO: implement
     } else if (millis() - launchTime > STAGE_2_IGNITION_DELAY && (ascentState && baroAlt > ARM_ALT)) {
       flightState++;
-      igniteStageTwo(); //TODO: implement
+      //ignite stage two
+      stageTwoIgnitionTime = millis();
+      digitalWrite(STAGE_2_IGNITER, HIGH);
     }
   } else if (flightState == 2) { //stage two ignited
     if (!ascentState) {
       flightState++;
-      deployDrogue(); //TODO: implement
+      drogueDeployTime = millis();
+      digitalWrite(RECOVERY_IGNITER, HIGH);
     }
   } else if (flightState == 3) { //drogue deployed
     if (baroAlt <= MAIN_CHUTE_DEPLOY_ALT) {
       flightState++;
-      deployMain(); //TODO: implement
+      mainDeployTime = millis();
+      mainChuteServo.write(180);
     }
-  } else if (flightState == 4) { //descent
+  } else if (flightState == 4) { //final descent
     //TODO: implement
   }
 }
