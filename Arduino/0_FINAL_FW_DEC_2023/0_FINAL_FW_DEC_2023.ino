@@ -3,6 +3,7 @@
 #include <SPI.h>
 #include <TinyGPSPlus.h>
 #include <Adafruit_BMP280.h>
+#include <Adafruit_MPU6050.h>
 #include <Servo.h>
 
 //comment out to remove serial debug output
@@ -14,6 +15,7 @@
 #define RECOVERY_CONTINUITY A0
 #define STAGE_2_CONTINUITY A1
 #define BATT_SENSE A2
+#define SD_CS 2
 
 #define PACKET_DELAY_ON_GROUND 5000
 #define PACKET_DELAY_IN_AIR 100
@@ -29,8 +31,16 @@
 #define ALT_BUFFER_SIZE 10
 #define ALT_BUFFER_DELAY 100 //how often alt buffer values are added
 
+//sensor objects and servo
+TinyGPSPlus gpsObject;
+Adafruit_BMP280 bmp;
+Adafruit_MPU6050 mpu;
+Servo mainChuteServo;
+
 //for SD
 File logFile;
+
+sensors_event_t a, g, t; //acceleration sensor event for mpu
 
 //baro variables
 double groundPressure = 0.0;
@@ -53,16 +63,21 @@ int16_t AcX,AcY,AcZ;
 int minVal=265;
 int maxVal=402;
  
-double yAccel = 0.0;
 double xTilt = 0.0;
 double yTilt = 0.0; //we don't care for roll but log it anyways
 double zTilt = 0.0;
 
-int flightState = 0 //-1 failsafe, 0 on ground, 1 launch detected, 2 second stage ignition, 3 drogue deployed, 4 main deployed, 5 landed
+int flightState = 0; //-1 failsafe, 0 on ground, 1 launch detected, 2 second stage ignition, 3 drogue deployed, 4 main deployed, 5 landed
 
 //timers
 unsigned long oldBroadcastTime = 0; //used for timing status update broadcasts
 unsigned long oldLogTime = 0; //used for timing SD card logs
+
+//time variables for logging
+unsigned long launchTime = 0;
+unsigned long stageTwoIgnitionTime = 0;
+unsigned long recoveryDeployedTime = 0;
+unsigned long mainDeployedTime = 0;
 
 void setup() {
 
@@ -106,11 +121,16 @@ void setup() {
   }
 
   //mpu&baro init
-  Wire.begin();
-  Wire.beginTransmission(0x68);
-  Wire.write(0x6B);
-  Wire.write(0);
-  Wire.endTransmission(true);
+  mpu.begin(); 
+  mpu.setAccelerometerRange(MPU6050_RANGE_16_G);
+  mpu.setGyroRange(MPU6050_RANGE_2000_DEG);
+  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+
+  #ifdef DEBUG
+  Serial.println("IMU_OK");
+  #endif
+
+  logMessage("IMU_OK");
 
   bmp.begin(0x76, 0x58);
   groundPressure = bmp.readPressure() / 100;
@@ -121,10 +141,10 @@ void setup() {
                   Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
 
   #ifdef DEBUG
-  Serial.println("I2C_OK");
+  Serial.println("BARO_OK");
   #endif
 
-  logMessage("I2C_OK")
+  logMessage("BARO_OK");
   
   //I/O init
   pinMode(STAGE_2_IGNITER, OUTPUT);
@@ -138,7 +158,7 @@ void setup() {
   Serial.println("IO_OK");
   #endif
 
-  logMessage("IO_OK")
+  logMessage("IO_OK");
 
   //fill alt buffer
   for (int i = 0; i < ALT_BUFFER_SIZE; i++)
@@ -173,7 +193,7 @@ void loop() {
 void updateGPS() {
   //update GPS data
   while (Serial3.available() > 0) {
-    gpsObject.encode(GPS.read());
+    gpsObject.encode(Serial3.read());
 
     if (gpsObject.location.isUpdated()) {
       latitude = gpsObject.location.lat();
@@ -183,15 +203,12 @@ void updateGPS() {
 }
 
 void updateAccel() {
-  //read accelerometer data 
+  //read accelerometer data
   //TODO: test
-  Wire.beginTransmission(0x68);
-  Wire.write(0x3B);
-  Wire.endTransmission(false);
-  Wire.requestFrom(0x68,14,true);
-  AcX=Wire.read()<<8|Wire.read();
-  AcY=Wire.read()<<8|Wire.read();
-  AcZ=Wire.read()<<8|Wire.read();
+  mpu.getEvent(&a, &g, &t);
+  AcX=a.acceleration.x;
+  AcY=a.acceleration.y;
+  AcZ=a.acceleration.z;
   int xAng = map(AcX,minVal,maxVal,-90,90);
   int yAng = map(AcY,minVal,maxVal,-90,90);
   int zAng = map(AcZ,minVal,maxVal,-90,90);
@@ -199,8 +216,6 @@ void updateAccel() {
   xTilt = RAD_TO_DEG * (atan2(-yAng, -zAng)+PI);
   yTilt = RAD_TO_DEG * (atan2(-xAng, -zAng)+PI);
   zTilt = RAD_TO_DEG * (atan2(-yAng, -xAng)+PI);
-
-  yAccel = -1*a.acceleration.y;
 }
 
 void updateGyro() {
@@ -215,9 +230,10 @@ void updateBaro() {
 
 void checkLoRaBuffer() {
   //check if we got commands
+  char loraBuffer;
   while (Serial2.available()) {
 
-    loraBuffer = LoRa.read();
+    loraBuffer = Serial2.read();
 
     if (loraBuffer == 'A') { //arm
 
@@ -299,14 +315,16 @@ void updateFlightState() {
   }
 
   if (flightState == 0) { //on ground
-    if (yAccel > 0) {
+    if (a.acceleration.y > 0) {
       flightState++;
       launchTime = millis();
     }
   } else if (flightState == 1) { //launch detected
     if ((altBufferAverage < 0) && baroAlt > MIN_FAILSAFE_ALT) { //if we're falling and we've exceeded the minimum failsafe altitude, open chute
       flightState == -1;
-      failsafe(); //TODO: implement
+      digitalWrite(RECOVERY_IGNITER, HIGH);
+      mainChuteServo.write(180);
+      recoveryDeployedTime = millis();
     } else if (millis() - launchTime > STAGE_2_IGNITION_DELAY && baroAlt > ARM_ALT) { //if we're ascending, the time to s2 ignition has passed, and we've exceeded minimum stage 2 ignition altitude, ignite stage 2
       flightState++;
       //ignite stage two
@@ -316,13 +334,13 @@ void updateFlightState() {
   } else if (flightState == 2) { //stage two ignited
     if (altBufferAverage < 0) {
       flightState++;
-      drogueDeployTime = millis();
+      recoveryDeployedTime = millis();
       digitalWrite(RECOVERY_IGNITER, HIGH);
     }
   } else if (flightState == 3) { //drogue deployed
     if (baroAlt <= MAIN_CHUTE_DEPLOY_ALT) {
       flightState++;
-      mainDeployTime = millis();
+      mainDeployedTime = millis();
       mainChuteServo.write(180);
     }
   } else if (flightState == 4) { //final descent
@@ -341,14 +359,14 @@ void transmitState() {
   if (flightState > 0 && flightState < 5) { //we're airborne, increase transmit rate
     
     if (millis() - oldBroadcastTime > PACKET_DELAY_IN_AIR) {
-      Serial2.println(makeTelemetryPacket);
+      Serial2.println(makeTelemetryPacket());
       oldBroadcastTime = millis();
     }
 
   } else { //we're on the ground, decrease transmit rate
 
     if (millis() - oldBroadcastTime > PACKET_DELAY_ON_GROUND) {
-      Serial2.println(makeTelemetryPacket);
+      Serial2.println(makeTelemetryPacket());
       oldBroadcastTime = millis();
     }
 
@@ -357,7 +375,7 @@ void transmitState() {
 
 String makeTelemetryPacket() {
   String packet = "";
-  packet += armState;
+  packet += isArmed;
   packet += "|";
   packet += flightState;
   packet += "|";
@@ -378,18 +396,18 @@ String makeTelemetryPacket() {
 notes
 
 packet format for SD:
-armState | flightState | battSense | baroAlt | baroVelocity | satCount | latitude | longitude | AcX | AcY | AcZ | xTilt | yTilt | zTilt | altBufferAverage | yAccel
+armState | flightState | battSense | baroAlt | baroVelocity | satCount | latitude | longitude | AcX | AcY | AcZ | xTilt | yTilt | zTilt | altBufferAverage
 */
 
 void logState() {
   if (isArmed) {
     if (millis() - oldLogTime > PACKET_DELAY_SD_CARD_IN_AIR) {
-      logMessage(makeSDPacket);
+      logMessage(makeSDPacket());
       oldLogTime = millis();
     }
   } else {
     if (millis() - oldLogTime > PACKET_DELAY_SD_CARD_ON_GROUND) {
-      logMessage(makeSDPacket);
+      logMessage(makeSDPacket());
       oldLogTime = millis();
     }
   }
@@ -411,8 +429,6 @@ String makeSDPacket() {
   packet += zTilt;
   packet += "|";
   packet += altBufferAverage;
-  packet += "|";
-  packet += yAccel;
 }
 
 void logMessage(String message) {
