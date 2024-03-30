@@ -17,8 +17,8 @@
 #define BATT_SENSE A2
 #define SD_CS 2
 
-#define PACKET_DELAY_ON_GROUND 5000
-#define PACKET_DELAY_IN_AIR 100
+#define PACKET_DELAY_ON_GROUND 2500
+#define PACKET_DELAY_IN_AIR 250
 #define PACKET_DELAY_SD_CARD_ON_GROUND 250 
 #define PACKET_DELAY_SD_CARD_IN_AIR 50 //in effect once vehicle is armed
 
@@ -79,6 +79,9 @@ unsigned long stageTwoIgnitionTime = 0;
 unsigned long recoveryDeployedTime = 0;
 unsigned long mainDeployedTime = 0;
 
+//peripheral states
+boolean SD_STATE = false;
+
 void setup() {
 
   #ifdef DEBUG
@@ -103,21 +106,28 @@ void setup() {
     #endif
 
     Serial2.println("SD_ERROR");
-  }
-
-  logFile = SD.open("log.txt", FILE_WRITE);
-  if (logFile) {
-
-    logMessage("INIT_START");
-
   } else {
+    logFile = SD.open("log.txt", FILE_WRITE);
+    if (logFile) {
+  
+      logMessage("INIT_START");
+
+      #ifdef DEBUG
+      Serial.println("SD init done");
+      #endif
     
-    #ifdef DEBUG
-    Serial.println("FILE_ERROR");
-    #endif
-
-    Serial2.println("FILE_ERROR");
-
+      //this is used later on since using the SD card without it initialized crashes the program
+      SD_STATE = true;
+  
+    } else {
+      
+      #ifdef DEBUG
+      Serial.println("FILE_ERROR");
+      #endif
+  
+      Serial2.println("FILE_ERROR");
+  
+    }
   }
 
   //mpu&baro init
@@ -166,7 +176,6 @@ void setup() {
 }
 
 void loop() {
-
   //update sensors
   updateGPS();
   updateAccel();
@@ -357,39 +366,30 @@ armState | flightState | battSense | baroAlt | baroVelocity | satCount | latitud
 
 void transmitState() {
   if (flightState > 0 && flightState < 5) { //we're airborne, increase transmit rate
-    
     if (millis() - oldBroadcastTime > PACKET_DELAY_IN_AIR) {
       Serial2.println(makeTelemetryPacket());
       oldBroadcastTime = millis();
     }
 
   } else { //we're on the ground, decrease transmit rate
-
     if (millis() - oldBroadcastTime > PACKET_DELAY_ON_GROUND) {
       Serial2.println(makeTelemetryPacket());
       oldBroadcastTime = millis();
     }
-
   }
 }
 
 String makeTelemetryPacket() {
-  String packet = "";
-  packet += isArmed;
-  packet += "|";
-  packet += flightState;
-  packet += "|";
-  packet += analogRead(BATT_SENSE);
-  packet += "|";
-  packet += baroAlt;
-  packet += "|";
-  packet += baroVelocity;
-  packet += "|";
-  packet += gpsObject.satellites.value();
-  packet += "|";
-  packet += latitude;
-  packet += "|";
-  packet += longitude;
+
+  char packet[1024] = "";
+
+  snprintf(packet, sizeof(packet), "%d|%d|%d|%d|%d|%d|%d|%d|", isArmed ? 1 : 0, flightState, analogRead(BATT_SENSE), baroAlt, baroVelocity, gpsObject.satellites.value(), latitude, longitude);
+  
+  #ifdef DEBUG
+    Serial.println(packet);
+  #endif
+  
+  return packet;
 }
 
 /*
@@ -400,6 +400,10 @@ armState | flightState | battSense | baroAlt | baroVelocity | satCount | latitud
 */
 
 void logState() {
+  if (!SD_STATE) {
+    return;
+  }
+  
   if (isArmed) {
     if (millis() - oldLogTime > PACKET_DELAY_SD_CARD_IN_AIR) {
       logMessage(makeSDPacket());
